@@ -1,6 +1,6 @@
 ﻿// このプログラムは指定された .sln (ソリューション) を Roslyn (MSBuildWorkspace) で解析し
 // 各プロジェクト内の「public const フィールド」を列挙し、その参照元(クラス/メンバー)と使用箇所コード断片を列挙します。
-// 出力はコンソールと実行ファイルと同じフォルダのテキストファイルへ書き出します。
+// 出力はコンソールと実行ファイルと同じフォルダの CSV ファイルへ書き出します。
 
 using System;
 using System.Linq;
@@ -15,13 +15,25 @@ using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.Text;
 
-// 出力蓄積
+// コンソール出力蓄積 (ログ目的)
 var output = new StringBuilder();
 void Log(string s)
 {
     Console.WriteLine(s);
     output.AppendLine(s);
 }
+
+// CSV 行蓄積
+var csvRows = new List<string>();
+// ヘッダー
+csvRows.Add(string.Join(',', new[]{
+    "FieldDeclaration",
+    "ReferenceType",
+    "ReferenceMember",
+    "LineNumber",
+    "FilePath",
+    "CodeLine"
+}));
 
 var workspace = MSBuildWorkspace.Create();
 
@@ -165,51 +177,65 @@ foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
             var filePath = lineSpan.Path;
 
             var sourceText = await document.GetTextAsync();
-            var snippet = BuildSnippet(sourceText, lineSpan); // 使用行のみ
+            var lineText = GetSingleLine(sourceText, lineSpan).Trim();
 
             Log($"   参照: {typeName}.{memberName} 行:{line} ファイル:{filePath}");
-            Log(snippet);
+            Log($"      >> {line,5}: {lineText}");
             refCount++;
+
+            csvRows.Add(string.Join(',', new[]{
+                CsvEscape(declarationText),
+                CsvEscape(typeName),
+                CsvEscape(memberName),
+                CsvEscape(line.ToString()),
+                CsvEscape(filePath),
+                CsvEscape(lineText)
+            }));
         }
     }
 
     if (refCount == 0)
     {
         Log("   参照: (なし)");
+        // 参照なしでもレコードを 1 行出す
+        csvRows.Add(string.Join(',', new[]{
+            CsvEscape(declarationText),
+            "","","","",""
+        }));
     }
 }
 
-// 出力ファイル書き込み
+// CSV 出力
 WriteOutAndExit();
 
-// 使用行のみ出力
-static string BuildSnippet(SourceText text, FileLinePositionSpan lineSpan)
+// 使用行の単一行テキスト
+static string GetSingleLine(SourceText text, FileLinePositionSpan lineSpan)
 {
     int lineNumber = lineSpan.StartLinePosition.Line; // 定数識別子開始行
     if (lineNumber < 0 || lineNumber >= text.Lines.Count) return string.Empty;
-
-    var lineText = text.Lines[lineNumber].ToString();
-    var sb = new StringBuilder();
-    sb.AppendLine("      ---- 使用行 ----");
-    sb.AppendLine($"      >> {lineNumber + 1,5}: {lineText}");
-    sb.Append("      ---------------");
-    return sb.ToString();
+    return text.Lines[lineNumber].ToString();
 }
 
-// ローカル関数: 収集済みの出力をファイルへ書き出し
+static string CsvEscape(string value)
+{
+    if (string.IsNullOrEmpty(value)) return string.Empty;
+    if (value.Contains('"') || value.Contains(',') || value.Contains('\n') || value.Contains('\r'))
+    {
+        return "\"" + value.Replace("\"", "\"\"") + "\"";
+    }
+    return value;
+}
+
+// ローカル関数: CSV ファイルへ書き出し
 void WriteOutAndExit()
 {
     try
     {
         var exeDir = AppContext.BaseDirectory;
         var timestamp = DateTime.Now.ToString("yyyyMMddHHmmss");
-        var outPath = Path.Combine(exeDir, $"ReferenceFinderResult_{timestamp}.txt");
-        File.WriteAllText(outPath, output.ToString(), new UTF8Encoding(false));
-        // まだ書かれていない場合のみ最後のメッセージを直接 Console へ
-        if (!output.ToString().Contains("結果ファイル:"))
-        {
-            Console.WriteLine($"結果ファイル: {outPath}");
-        }
+        var outPath = Path.Combine(exeDir, $"ReferenceFinderResult_{timestamp}.csv");
+        File.WriteAllLines(outPath, csvRows, new UTF8Encoding(false));
+        Console.WriteLine($"結果ファイル: {outPath}");
     }
     catch (Exception ex)
     {
