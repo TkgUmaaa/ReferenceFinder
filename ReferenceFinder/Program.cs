@@ -15,6 +15,9 @@ using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.Text;
 
+// 追加: Shift_JIS 利用のためコードページプロバイダ登録 (.NET 8)
+Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+
 // コンソール出力蓄積 (ログ目的)
 var output = new StringBuilder();
 void Log(string s)
@@ -25,15 +28,17 @@ void Log(string s)
 
 // CSV 行蓄積
 var csvRows = new List<string>();
-// ヘッダー (定数宣言クラス追加)
+// ヘッダー (日本語) ファイルパス列を最後へ移動
 csvRows.Add(string.Join(',', new[]{
-    "FieldDeclaration",
-    "FieldDeclaringType",
-    "ReferenceType",
-    "ReferenceMember",
-    "LineNumber",
-    "FilePath",
-    "CodeLine"
+    "定数宣言名前空間",   // FieldDeclaringNamespace
+    "定数宣言クラス",     // FieldDeclaringType
+    "定数宣言",           // FieldDeclaration
+    "参照クラス名前空間", // ReferenceTypeNamespace
+    "参照クラス",         // ReferenceType
+    "参照メンバー",       // ReferenceMember
+    "行番号",             // LineNumber
+    "コード行",           // CodeLine
+    "ファイルパス"        // FilePath (moved to end)
 }));
 
 var workspace = MSBuildWorkspace.Create();
@@ -139,7 +144,9 @@ foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
         declarationText = $"public const {fieldSymbol.Type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)} {fieldSymbol.Name} = {fieldSymbol.ConstantValue ?? "null"};";
     }
 
-    var fieldDeclaringType = fieldSymbol.ContainingType?.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat) ?? "(不明な型)";
+    var fieldDeclaringTypeSymbol = fieldSymbol.ContainingType;
+    var fieldDeclaringNamespace = fieldDeclaringTypeSymbol?.ContainingNamespace is { IsGlobalNamespace: true } ? "(グローバル)" : fieldDeclaringTypeSymbol?.ContainingNamespace?.ToDisplayString() ?? "(不明な名前空間)";
+    var fieldDeclaringType = fieldDeclaringTypeSymbol?.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat) ?? "(不明な型)";
     Log(declarationText);
 
     var references = await SymbolFinder.FindReferencesAsync(fieldSymbol, solution);
@@ -185,14 +192,18 @@ foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
             Log($"      >> {line,5}: {lineText}");
             refCount++;
 
+            var referenceNamespace = containingType?.ContainingNamespace is { IsGlobalNamespace: true } ? "(グローバル)" : containingType?.ContainingNamespace?.ToDisplayString() ?? "(不明な名前空間)";
+
             csvRows.Add(string.Join(',', new[]{
-                CsvEscape(declarationText),
+                CsvEscape(fieldDeclaringNamespace),
                 CsvEscape(fieldDeclaringType),
+                CsvEscape(declarationText),
+                CsvEscape(referenceNamespace),
                 CsvEscape(typeName),
                 CsvEscape(memberName),
                 CsvEscape(line.ToString()),
-                CsvEscape(filePath),
-                CsvEscape(lineText)
+                CsvEscape(lineText),
+                CsvEscape(filePath)
             }));
         }
     }
@@ -202,9 +213,10 @@ foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
         Log("   参照: (なし)");
         // 参照なしでもレコードを 1 行出す
         csvRows.Add(string.Join(',', new[]{
-            CsvEscape(declarationText),
+            CsvEscape(fieldDeclaringNamespace),
             CsvEscape(fieldDeclaringType),
-            "","","","",""
+            CsvEscape(declarationText),
+            "","","","","",""  // adjust to new column order (last is FilePath)
         }));
     }
 }
@@ -238,7 +250,9 @@ void WriteOutAndExit()
         var exeDir = AppContext.BaseDirectory;
         var timestamp = DateTime.Now.ToString("yyyyMMddHHmmss");
         var outPath = Path.Combine(exeDir, $"ReferenceFinderResult_{timestamp}.csv");
-        File.WriteAllLines(outPath, csvRows, new UTF8Encoding(false));
+        // Shift_JIS (932) で出力
+        var sjis = Encoding.GetEncoding(932);
+        File.WriteAllLines(outPath, csvRows, sjis);
         Console.WriteLine($"結果ファイル: {outPath}");
     }
     catch (Exception ex)
