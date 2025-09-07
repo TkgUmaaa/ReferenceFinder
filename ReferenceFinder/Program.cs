@@ -7,6 +7,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Text;
+using System.IO;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -15,8 +16,33 @@ using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.Text;
 
 var workspace = MSBuildWorkspace.Create();
-// 解析対象ソリューションパスを必要に応じて変更
-var solution = await workspace.OpenSolutionAsync(@"C:\develop\じゃんけん\じゃんけん\じゃんけん.sln");
+
+// コマンドライン引数から .sln を取得
+if (args.Length == 0)
+{
+    Console.WriteLine("使用方法: ReferenceFinder <solution.sln>");
+    return;
+}
+
+var solutionPath = args[0];
+if (!File.Exists(solutionPath))
+{
+    Console.WriteLine($"指定されたソリューションファイルが存在しません: {solutionPath}");
+    return;
+}
+solutionPath = Path.GetFullPath(solutionPath);
+Console.WriteLine($"解析対象ソリューション: {solutionPath}");
+
+Solution solution;
+try
+{
+    solution = await workspace.OpenSolutionAsync(solutionPath);
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"ソリューションを開く際にエラーが発生しました: {ex.Message}");
+    return;
+}
 
 // 全 public const フィールドシンボル収集
 var constFieldSymbols = new List<IFieldSymbol>();
