@@ -1,6 +1,6 @@
 ﻿// このプログラムは指定された .sln (ソリューション) を Roslyn (MSBuildWorkspace) で解析し
 // 各プロジェクト内の「public const フィールド」を列挙し、その参照元(クラス/メンバー)と使用箇所コード断片を列挙します。
-// 出力はコンソールへ表示します。
+// 出力はコンソールと実行ファイルと同じフォルダのテキストファイルへ書き出します。
 
 using System;
 using System.Linq;
@@ -15,23 +15,33 @@ using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.Text;
 
+// 出力蓄積
+var output = new StringBuilder();
+void Log(string s)
+{
+    Console.WriteLine(s);
+    output.AppendLine(s);
+}
+
 var workspace = MSBuildWorkspace.Create();
 
 // コマンドライン引数から .sln を取得
 if (args.Length == 0)
 {
-    Console.WriteLine("使用方法: ReferenceFinder <solution.sln>");
+    Log("使用方法: ReferenceFinder <solution.sln>");
+    WriteOutAndExit();
     return;
 }
 
 var solutionPath = args[0];
 if (!File.Exists(solutionPath))
 {
-    Console.WriteLine($"指定されたソリューションファイルが存在しません: {solutionPath}");
+    Log($"指定されたソリューションファイルが存在しません: {solutionPath}");
+    WriteOutAndExit();
     return;
 }
 solutionPath = Path.GetFullPath(solutionPath);
-Console.WriteLine($"解析対象ソリューション: {solutionPath}");
+Log($"解析対象ソリューション: {solutionPath}");
 
 Solution solution;
 try
@@ -40,7 +50,8 @@ try
 }
 catch (Exception ex)
 {
-    Console.WriteLine($"ソリューションを開く際にエラーが発生しました: {ex.Message}");
+    Log($"ソリューションを開く際にエラーが発生しました: {ex.Message}");
+    WriteOutAndExit();
     return;
 }
 
@@ -77,11 +88,11 @@ constFieldSymbols = constFieldSymbols
     .Distinct<IFieldSymbol>(SymbolEqualityComparer.Default)
     .ToList();
 
-Console.WriteLine($"public const フィールド数: {constFieldSymbols.Count}");
+Log($"public const フィールド数: {constFieldSymbols.Count}");
 
 foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
 {
-    Console.WriteLine($"定数: {fieldSymbol.ContainingType?.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)}.{fieldSymbol.Name} = {fieldSymbol.ConstantValue ?? "null"}");
+    Log($"定数: {fieldSymbol.ContainingType?.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)}.{fieldSymbol.Name} = {fieldSymbol.ConstantValue ?? "null"}");
 
     var references = await SymbolFinder.FindReferencesAsync(fieldSymbol, solution);
     var refCount = 0;
@@ -122,17 +133,20 @@ foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
             var sourceText = await document.GetTextAsync();
             var snippet = BuildSnippet(sourceText, lineSpan); // 使用行のみ
 
-            Console.WriteLine($"   参照: {typeName}.{memberName} 行:{line} ファイル:{filePath}");
-            Console.WriteLine(snippet);
+            Log($"   参照: {typeName}.{memberName} 行:{line} ファイル:{filePath}");
+            Log(snippet);
             refCount++;
         }
     }
 
     if (refCount == 0)
     {
-        Console.WriteLine("   参照: (なし)");
+        Log("   参照: (なし)");
     }
 }
+
+// 出力ファイル書き込み
+WriteOutAndExit();
 
 // 使用行のみ出力
 static string BuildSnippet(SourceText text, FileLinePositionSpan lineSpan)
@@ -146,4 +160,25 @@ static string BuildSnippet(SourceText text, FileLinePositionSpan lineSpan)
     sb.AppendLine($"      >> {lineNumber + 1,5}: {lineText}");
     sb.Append("      ---------------");
     return sb.ToString();
+}
+
+// ローカル関数: 収集済みの出力をファイルへ書き出し
+void WriteOutAndExit()
+{
+    try
+    {
+        var exeDir = AppContext.BaseDirectory;
+        var timestamp = DateTime.Now.ToString("yyyyMMddHHmmss");
+        var outPath = Path.Combine(exeDir, $"ReferenceFinderResult_{timestamp}.txt");
+        File.WriteAllText(outPath, output.ToString(), new UTF8Encoding(false));
+        // まだ書かれていない場合のみ最後のメッセージを直接 Console へ
+        if (!output.ToString().Contains("結果ファイル:"))
+        {
+            Console.WriteLine($"結果ファイル: {outPath}");
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"結果ファイル書き込み中にエラー: {ex.Message}");
+    }
 }
