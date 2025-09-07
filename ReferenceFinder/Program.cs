@@ -92,7 +92,41 @@ Log($"public const フィールド数: {constFieldSymbols.Count}");
 
 foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
 {
-    Log($"定数: {fieldSymbol.ContainingType?.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)}.{fieldSymbol.Name} = {fieldSymbol.ConstantValue ?? "null"}");
+    // 元のフィールド宣言 (単一変数ならソースそのまま) もしくは再構築した宣言テキスト
+    string declarationText = string.Empty;
+    var syntaxRef = fieldSymbol.DeclaringSyntaxReferences.FirstOrDefault();
+    if (syntaxRef != null)
+    {
+        var syntaxNode = await syntaxRef.GetSyntaxAsync();
+        if (syntaxNode is VariableDeclaratorSyntax vds)
+        {
+            if (vds.Parent?.Parent is FieldDeclarationSyntax fieldDecl)
+            {
+                // フィールドが 1 変数のみの場合はフィールド宣言全体をそのまま利用
+                if (fieldDecl.Declaration.Variables.Count == 1)
+                {
+                    declarationText = fieldDecl.ToFullString().Trim();
+                }
+                else
+                {
+                    // 複数宣言から対象変数のみを再構築
+                    var modifiers = string.Join(" ", fieldDecl.Modifiers.Select(m => m.Text));
+                    if (!string.IsNullOrEmpty(modifiers)) modifiers += " ";
+                    var typeText = fieldDecl.Declaration.Type.ToFullString().Trim();
+                    var initText = vds.Initializer != null ? " = " + vds.Initializer.Value.ToFullString().Trim() : string.Empty;
+                    declarationText = $"{modifiers}{typeText} {vds.Identifier.Text}{initText};";
+                }
+            }
+        }
+    }
+
+    if (string.IsNullOrWhiteSpace(declarationText))
+    {
+        // フォールバック (必要最低限の情報)
+        declarationText = $"public const {fieldSymbol.Type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)} {fieldSymbol.Name} = {fieldSymbol.ConstantValue ?? "null"};";
+    }
+
+    Log(declarationText);
 
     var references = await SymbolFinder.FindReferencesAsync(fieldSymbol, solution);
     var refCount = 0;
