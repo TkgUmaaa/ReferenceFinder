@@ -25,9 +25,10 @@ void Log(string s)
 
 // CSV 行蓄積
 var csvRows = new List<string>();
-// ヘッダー
+// ヘッダー (定数宣言クラス追加)
 csvRows.Add(string.Join(',', new[]{
     "FieldDeclaration",
+    "FieldDeclaringType",
     "ReferenceType",
     "ReferenceMember",
     "LineNumber",
@@ -138,6 +139,7 @@ foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
         declarationText = $"public const {fieldSymbol.Type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)} {fieldSymbol.Name} = {fieldSymbol.ConstantValue ?? "null"};";
     }
 
+    var fieldDeclaringType = fieldSymbol.ContainingType?.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat) ?? "(不明な型)";
     Log(declarationText);
 
     var references = await SymbolFinder.FindReferencesAsync(fieldSymbol, solution);
@@ -185,6 +187,7 @@ foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
 
             csvRows.Add(string.Join(',', new[]{
                 CsvEscape(declarationText),
+                CsvEscape(fieldDeclaringType),
                 CsvEscape(typeName),
                 CsvEscape(memberName),
                 CsvEscape(line.ToString()),
@@ -200,6 +203,7 @@ foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
         // 参照なしでもレコードを 1 行出す
         csvRows.Add(string.Join(',', new[]{
             CsvEscape(declarationText),
+            CsvEscape(fieldDeclaringType),
             "","","","",""
         }));
     }
