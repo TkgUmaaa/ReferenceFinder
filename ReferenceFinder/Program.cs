@@ -1,6 +1,6 @@
 ﻿// このプログラムは指定された .sln (ソリューション) を Roslyn (MSBuildWorkspace) で解析し
-// 各プロジェクト内の「public const フィールド」を列挙し、その参照元(クラス/メンバー)と使用箇所コード断片を列挙します。
-// 出力はコンソールと実行ファイルと同じフォルダの CSV ファイルへ書き出します。
+// VB プロジェクト内の Public Const フィールド と Public / Protected メソッドを列挙し
+// それぞれの参照元(クラス/メンバー)と使用箇所コード断片を CSV 出力します。
 
 using System;
 using System.Linq;
@@ -9,11 +9,12 @@ using System.Collections.Generic;
 using System.Text;
 using System.IO;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.Text;
+using Microsoft.CodeAnalysis.VisualBasic;
+using Microsoft.CodeAnalysis.VisualBasic.Syntax;
+using VBSyntaxKind = Microsoft.CodeAnalysis.VisualBasic.SyntaxKind;
 
 // 追加: Shift_JIS 利用のためコードページプロバイダ登録 (.NET 8)
 Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
@@ -28,17 +29,19 @@ void Log(string s)
 
 // CSV 行蓄積
 var csvRows = new List<string>();
-// ヘッダー (日本語) ファイルパス列を最後へ移動
+// ヘッダー (日本語) アクセスレベル列を追加
 csvRows.Add(string.Join(',', new[]{
-    "定数宣言名前空間",   // FieldDeclaringNamespace
-    "定数宣言クラス",     // FieldDeclaringType
-    "定数宣言",           // FieldDeclaration
-    "参照クラス名前空間", // ReferenceTypeNamespace
-    "参照クラス",         // ReferenceType
-    "参照メンバー",       // ReferenceMember
-    "行番号",             // LineNumber
-    "コード行",           // CodeLine
-    "ファイルパス"        // FilePath (moved to end)
+    "メンバー種別",         // MemberKind (ConstField / Method)
+    "アクセスレベル",       // Accessibility (Public / Protected)
+    "宣言名前空間",         // DeclaringNamespace
+    "宣言クラス",           // DeclaringType
+    "宣言",                 // Declaration
+    "参照クラス名前空間",   // ReferenceTypeNamespace
+    "参照クラス",           // ReferenceType
+    "参照メンバー",         // ReferenceMember
+    "行番号",               // LineNumber
+    "コード行",             // CodeLine
+    "ファイルパス"          // FilePath
 }));
 
 var workspace = MSBuildWorkspace.Create();
@@ -73,83 +76,89 @@ catch (Exception ex)
     return;
 }
 
-// 全 public const フィールドシンボル収集
+// 収集用リスト
 var constFieldSymbols = new List<IFieldSymbol>();
-foreach (var project in solution.Projects)
+var methodSymbols = new List<IMethodSymbol>();
+
+foreach (var project in solution.Projects.Where(p => p.Language == LanguageNames.VisualBasic))
 {
     var compilation = await project.GetCompilationAsync();
     if (compilation == null) continue;
 
     foreach (var tree in compilation.SyntaxTrees)
     {
+        if (tree.Options is not VisualBasicParseOptions) continue; // 念のため
         var model = compilation.GetSemanticModel(tree);
         var root = await tree.GetRootAsync();
-        var fields = root.DescendantNodes()
-            .OfType<FieldDeclarationSyntax>()
-            .Where(f => f.Modifiers.Any(m => m.IsKind(SyntaxKind.ConstKeyword)) &&
-                        f.Modifiers.Any(m => m.IsKind(SyntaxKind.PublicKeyword)));
 
-        foreach (var fd in fields)
+        // Public Const フィールド
+        var fieldDecls = root.DescendantNodes()
+            .OfType<FieldDeclarationSyntax>()
+            .Where(f => f.Modifiers.Any(m => m.IsKind(VBSyntaxKind.PublicKeyword)) &&
+                        f.Modifiers.Any(m => m.IsKind(VBSyntaxKind.ConstKeyword)));
+
+        foreach (var fd in fieldDecls)
         {
-            foreach (var v in fd.Declaration.Variables)
+            foreach (var declarator in fd.Declarators)
             {
-                if (model.GetDeclaredSymbol(v) is IFieldSymbol fs)
+                foreach (var name in declarator.Names)
                 {
-                    constFieldSymbols.Add(fs);
+                    if (model.GetDeclaredSymbol(name) is IFieldSymbol fs)
+                    {
+                        constFieldSymbols.Add(fs);
+                    }
                 }
             }
+        }
+
+        // Public / Protected 系 メソッド
+        var methodStatements = root.DescendantNodes().OfType<MethodStatementSyntax>();
+        foreach (var ms in methodStatements)
+        {
+            if (!(ms.Kind() == VBSyntaxKind.SubStatement || ms.Kind() == VBSyntaxKind.FunctionStatement))
+                continue;
+            var sym = model.GetDeclaredSymbol(ms) as IMethodSymbol;
+            if (sym == null) continue;
+            if (sym.MethodKind == MethodKind.PropertyGet || sym.MethodKind == MethodKind.PropertySet) continue;
+            if (sym.MethodKind == MethodKind.EventAdd || sym.MethodKind == MethodKind.EventRemove || sym.MethodKind == MethodKind.EventRaise) continue;
+            // アクセスレベル: Public / Protected のみ
+            if (!(sym.DeclaredAccessibility == Accessibility.Public ||
+                  sym.DeclaredAccessibility == Accessibility.Protected))
+            {
+                continue;
+            }
+            methodSymbols.Add(sym);
         }
     }
 }
 
-constFieldSymbols = constFieldSymbols
-    .Distinct<IFieldSymbol>(SymbolEqualityComparer.Default)
-    .ToList();
+constFieldSymbols = constFieldSymbols.Distinct<IFieldSymbol>(SymbolEqualityComparer.Default).ToList();
+methodSymbols = methodSymbols.Distinct<IMethodSymbol>(SymbolEqualityComparer.Default).ToList();
 
-Log($"public const フィールド数: {constFieldSymbols.Count}");
+Log($"(VB) Public Const フィールド数: {constFieldSymbols.Count}");
+Log($"(VB) Public/Protected メソッド数: {methodSymbols.Count}");
 
-foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
+var memberEntries = new List<(ISymbol Symbol, string Kind)>();
+memberEntries.AddRange(constFieldSymbols.Select(f => ((ISymbol)f, "ConstField")));
+memberEntries.AddRange(methodSymbols.Select(m => ((ISymbol)m, "Method")));
+
+foreach (var (symbol, kind) in memberEntries)
 {
-    // 元のフィールド宣言 (単一変数ならソースそのまま) もしくは再構築した宣言テキスト
-    string declarationText = string.Empty;
-    var syntaxRef = fieldSymbol.DeclaringSyntaxReferences.FirstOrDefault();
-    if (syntaxRef != null)
+    string declarationText = GetDeclarationText(symbol, kind);
+
+    var declaringTypeSymbol = symbol.ContainingType;
+    var declaringNamespace = declaringTypeSymbol?.ContainingNamespace is { IsGlobalNamespace: true } ? "(グローバル)" : declaringTypeSymbol?.ContainingNamespace?.ToDisplayString() ?? "(不明な名前空間)";
+    var declaringType = declaringTypeSymbol?.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat) ?? "(不明な型)";
+    string accessibility = symbol switch
     {
-        var syntaxNode = await syntaxRef.GetSyntaxAsync();
-        if (syntaxNode is VariableDeclaratorSyntax vds)
-        {
-            if (vds.Parent?.Parent is FieldDeclarationSyntax fieldDecl)
-            {
-                // フィールドが 1 変数のみの場合はフィールド宣言全体をそのまま利用
-                if (fieldDecl.Declaration.Variables.Count == 1)
-                {
-                    declarationText = fieldDecl.ToFullString().Trim();
-                }
-                else
-                {
-                    // 複数宣言から対象変数のみを再構築
-                    var modifiers = string.Join(" ", fieldDecl.Modifiers.Select(m => m.Text));
-                    if (!string.IsNullOrEmpty(modifiers)) modifiers += " ";
-                    var typeText = fieldDecl.Declaration.Type.ToFullString().Trim();
-                    var initText = vds.Initializer != null ? " = " + vds.Initializer.Value.ToFullString().Trim() : string.Empty;
-                    declarationText = $"{modifiers}{typeText} {vds.Identifier.Text}{initText};";
-                }
-            }
-        }
-    }
+        IFieldSymbol => "Public", // ConstField は Public のみ
+        IMethodSymbol ms => ms.DeclaredAccessibility == Accessibility.Public ? "Public" : "Protected",
+        _ => string.Empty
+    };
 
-    if (string.IsNullOrWhiteSpace(declarationText))
-    {
-        // フォールバック (必要最低限の情報)
-        declarationText = $"public const {fieldSymbol.Type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)} {fieldSymbol.Name} = {fieldSymbol.ConstantValue ?? "null"};";
-    }
+    Log($"[{kind}] {declarationText} ({accessibility})");
 
-    var fieldDeclaringTypeSymbol = fieldSymbol.ContainingType;
-    var fieldDeclaringNamespace = fieldDeclaringTypeSymbol?.ContainingNamespace is { IsGlobalNamespace: true } ? "(グローバル)" : fieldDeclaringTypeSymbol?.ContainingNamespace?.ToDisplayString() ?? "(不明な名前空間)";
-    var fieldDeclaringType = fieldDeclaringTypeSymbol?.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat) ?? "(不明な型)";
-    Log(declarationText);
-
-    var references = await SymbolFinder.FindReferencesAsync(fieldSymbol, solution);
+    var references = await SymbolFinder.FindReferencesAsync(symbol, solution);
     var refCount = 0;
 
     foreach (var refResult in references)
@@ -195,8 +204,10 @@ foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
             var referenceNamespace = containingType?.ContainingNamespace is { IsGlobalNamespace: true } ? "(グローバル)" : containingType?.ContainingNamespace?.ToDisplayString() ?? "(不明な名前空間)";
 
             csvRows.Add(string.Join(',', new[]{
-                CsvEscape(fieldDeclaringNamespace),
-                CsvEscape(fieldDeclaringType),
+                CsvEscape(kind),
+                CsvEscape(accessibility),
+                CsvEscape(declaringNamespace),
+                CsvEscape(declaringType),
                 CsvEscape(declarationText),
                 CsvEscape(referenceNamespace),
                 CsvEscape(typeName),
@@ -211,12 +222,13 @@ foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
     if (refCount == 0)
     {
         Log("   参照: (なし)");
-        // 参照なしでもレコードを 1 行出す
         csvRows.Add(string.Join(',', new[]{
-            CsvEscape(fieldDeclaringNamespace),
-            CsvEscape(fieldDeclaringType),
+            CsvEscape(kind),
+            CsvEscape(accessibility),
+            CsvEscape(declaringNamespace),
+            CsvEscape(declaringType),
             CsvEscape(declarationText),
-            "","","","","",""  // adjust to new column order (last is FilePath)
+            "","","","","",""
         }));
     }
 }
@@ -224,10 +236,107 @@ foreach (IFieldSymbol fieldSymbol in constFieldSymbols)
 // CSV 出力
 WriteOutAndExit();
 
+// 宣言テキスト取得
+static string GetDeclarationText(ISymbol symbol, string kind)
+{
+    if (kind == "ConstField" && symbol is IFieldSymbol fieldSymbol)
+    {
+        string declarationText = string.Empty;
+        var syntaxRef = fieldSymbol.DeclaringSyntaxReferences.FirstOrDefault();
+        if (syntaxRef != null)
+        {
+            var syntaxNode = syntaxRef.GetSyntaxAsync().Result;
+            if (syntaxNode is ModifiedIdentifierSyntax mis &&
+                mis.Parent is VariableDeclaratorSyntax vbVarDecl &&
+                vbVarDecl.Parent is FieldDeclarationSyntax vbFieldDecl)
+            {
+                bool single = vbFieldDecl.Declarators.Count == 1 && vbVarDecl.Names.Count == 1;
+                if (single)
+                {
+                    declarationText = vbFieldDecl.ToFullString().Trim();
+                }
+                else
+                {
+                    var modifiers = string.Join(" ", vbFieldDecl.Modifiers.Select(m => m.Text));
+                    if (!string.IsNullOrEmpty(modifiers)) modifiers += " ";
+                    string? typeText = null;
+                    if (vbVarDecl.AsClause is SimpleAsClauseSyntax simpleAs)
+                    {
+                        typeText = simpleAs.Type.ToFullString().Trim();
+                    }
+                    else if (vbVarDecl.AsClause is AsNewClauseSyntax asNew)
+                    {
+                        typeText = asNew.ToFullString().Trim();
+                    }
+                    if (string.IsNullOrEmpty(typeText))
+                    {
+                        typeText = fieldSymbol.Type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
+                    }
+                    var initValue = vbVarDecl.Initializer?.Value?.ToFullString().Trim();
+                    string initText = !string.IsNullOrEmpty(initValue)
+                        ? " = " + initValue
+                        : " = " + FormatConstantValue(fieldSymbol);
+                    if (!typeText!.StartsWith("As ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        typeText = "As " + typeText;
+                    }
+                    declarationText = $"{modifiers}Const {mis.Identifier.Text} {typeText}{initText}";
+                }
+            }
+        }
+        if (string.IsNullOrWhiteSpace(declarationText))
+        {
+            declarationText = $"Public Const {fieldSymbol.Name} As {fieldSymbol.Type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)} = {FormatConstantValue(fieldSymbol)}";
+        }
+        return declarationText;
+    }
+    else if (kind == "Method" && symbol is IMethodSymbol methodSymbol)
+    {
+        var syntaxRef = methodSymbol.DeclaringSyntaxReferences.FirstOrDefault();
+        if (syntaxRef != null)
+        {
+            var sn = syntaxRef.GetSyntaxAsync().Result;
+            if (sn is MethodStatementSyntax ms)
+            {
+                return ms.ToFullString().Trim();
+            }
+        }
+        var returnType = methodSymbol.ReturnsVoid ? "Void" : methodSymbol.ReturnType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
+        var parameters = string.Join(", ", methodSymbol.Parameters.Select(p => p.Name + " As " + p.Type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)));
+        var accessibility = methodSymbol.DeclaredAccessibility switch
+        {
+            Accessibility.Public => "Public ",
+            Accessibility.Protected => "Protected ",
+            _ => string.Empty
+        };
+        var keyword = methodSymbol.ReturnsVoid ? "Sub" : "Function";
+        var ret = methodSymbol.ReturnsVoid ? string.Empty : " As " + returnType;
+        return $"{accessibility}{keyword} {methodSymbol.Name}({parameters}){ret}".Trim();
+    }
+    return symbol.ToDisplayString();
+}
+
+// VB 用: 定数値を VB コード片として整形
+static string FormatConstantValue(IFieldSymbol field)
+{
+    object? v = field.ConstantValue;
+    if (v == null) return "Nothing";
+    return v switch
+    {
+        string s => "\"" + s.Replace("\"", "\"\"") + "\"",
+        char c => "\"" + c.ToString().Replace("\"", "\"\"") + "\"",
+        bool b => b ? "True" : "False",
+        float f => f.ToString(System.Globalization.CultureInfo.InvariantCulture) + "F",
+        double d => d.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        decimal m => m.ToString(System.Globalization.CultureInfo.InvariantCulture) + "D",
+        _ => Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture) ?? "Nothing"
+    };
+}
+
 // 使用行の単一行テキスト
 static string GetSingleLine(SourceText text, FileLinePositionSpan lineSpan)
 {
-    int lineNumber = lineSpan.StartLinePosition.Line; // 定数識別子開始行
+    int lineNumber = lineSpan.StartLinePosition.Line; // 識別子開始行
     if (lineNumber < 0 || lineNumber >= text.Lines.Count) return string.Empty;
     return text.Lines[lineNumber].ToString();
 }
